@@ -1,0 +1,17 @@
+{
+  "name": "cardio-report",
+  "private": true,
+  "version": "1.0.0",
+  "description": "التقرير اليومي لقسم القلب",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:emulator": "node build.mjs --emulator"
+  },
+  "dependencies": {
+    "firebase": "12.19.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

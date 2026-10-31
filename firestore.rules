@@ -1,0 +1,43 @@
+rules_version = '2';
+// Access rules for the cardiology daily report.
+// Only accounts the admin created (a document in /staff with active == true) can read or change ward data.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function staffPath(uid) { return /databases/$(database)/documents/staff/$(uid); }
+    // get() on a missing document fails the rule, so a signed-in account without a staff record is refused
+    function isStaff() { return signedIn() && get(staffPath(request.auth.uid)).data.active == true; }
+    function isAdmin() { return isStaff() && get(staffPath(request.auth.uid)).data.role == 'admin'; }
+    function setupDone() { return exists(/databases/$(database)/documents/meta/setup); }
+    function validStaff(d) {
+      return d.name is string && d.name.size() > 0 && d.name.size() <= 80
+        && d.role in ['admin', 'nurse'] && d.active is bool;
+    }
+
+    // First run: the very first account creates itself as admin together with this marker, once.
+    match /meta/setup {
+      allow get: if true;
+      allow create: if signedIn() && !setupDone()
+        && request.resource.data.by == request.auth.uid
+        && getAfter(staffPath(request.auth.uid)).data.role == 'admin';
+    }
+
+    match /staff/{uid} {
+      allow get: if signedIn() && (uid == request.auth.uid || isStaff());
+      allow list: if isStaff();
+      allow create: if validStaff(request.resource.data) && (
+        isAdmin()
+        || (signedIn() && uid == request.auth.uid && !setupDone()
+            && request.resource.data.role == 'admin' && request.resource.data.active == true
+            && existsAfter(/databases/$(database)/documents/meta/setup))
+      );
+      // admins manage everyone except themselves, so the last admin cannot lock the ward out
+      allow update: if isAdmin() && uid != request.auth.uid && validStaff(request.resource.data);
+      allow delete: if false;
+    }
+
+    match /ward/{document=**} {
+      allow read, write: if isStaff();
+    }
+  }
+}
