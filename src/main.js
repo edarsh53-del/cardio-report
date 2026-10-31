@@ -332,10 +332,15 @@ onAuthStateChanged(auth, user => {
 async function decideGate() {
   gate = {mode:'loading'};
   renderGate();
-  let done = true;
-  try { done = (await getDoc(doc(db, 'meta', 'setup'))).exists(); } catch (e) { done = true; }
+  let mode = 'login';
+  try { mode = (await getDoc(doc(db, 'meta', 'setup'))).exists() ? 'login' : 'setup'; }
+  catch (e) {
+    // the marker is readable by anyone once our rules are published; a refusal means they are not
+    if (e && e.code === 'permission-denied') mode = 'rules';
+    // offline or unreachable: whoever set up this device can still sign in from the login form
+  }
   if (auth.currentUser) return;
-  gate = {mode: done ? 'login' : 'setup'};
+  gate = {mode};
   renderGate();
 }
 
@@ -1041,6 +1046,14 @@ function renderGate() {
       <p id="gate-err" class="err" role="alert" hidden></p>
       <button type="submit" id="gate-btn" class="btn primary lg block">إنشاء حساب المدير</button>
     </form>`;
+  else if (g.mode === 'rules') body = `
+    <div class="inline-box warn"><p><b>قواعد الحماية في Firebase غير منشورة بعد.</b></p><p>لا يمكن إعداد البرنامج أو الدخول إليه قبل نشرها.</p></div>
+    <ol class="plain">
+      <li>افتح Firebase Console ثم <b>Firestore Database</b> (وليس Realtime Database).</li>
+      <li>من تبويب <b>Rules</b> امسح الموجود والصق القواعد.</li>
+      <li>اضغط <b>Publish</b> وانتظر دقيقة.</li>
+    </ol>
+    <button type="button" class="btn primary block" data-act="gate-retry">إعادة المحاولة</button>`;
   else if (g.mode === 'inactive') body = `
     <div class="inline-box warn"><p><b>هذا الحساب غير مفعّل في البرنامج.</b></p><p>${esc(g.err || 'اطلب من المدير تفعيل حسابك.')}</p></div>
     <button type="button" class="btn block" data-act="logout-force">تسجيل الخروج</button>`;
@@ -1381,6 +1394,7 @@ const H = {
   'st-active': el => { const s = state.staff.find(x => x.id === el.dataset.v); if (s && s.id !== session.uid) updateStaff(s.id, {active:!s.active}); },
   'st-role': el => { const s = state.staff.find(x => x.id === el.dataset.v); if (s && s.id !== session.uid) updateStaff(s.id, {role:s.role === 'admin' ? 'nurse' : 'admin'}); },
   'pw-change': () => changePassword(),
+  'gate-retry': () => decideGate(),
   logout: () => { if (pending > 0 && !navigator.onLine) { ui.logoutConfirm = true; renderSheet(); return; } doLogout(); },
   'logout-force': () => doLogout(),
   'logout-cancel': () => { ui.logoutConfirm = false; renderSheet(); },

@@ -1,5 +1,5 @@
 // Offline shell for the app. Patient data is not cached here: Firestore keeps its own offline copy.
-const VERSION = '20261031210452';
+const VERSION = '20261031212857';
 const CACHE = 'cardio-' + VERSION;
 const SHELL = ['./', './index.html', './app.js?v=' + VERSION, './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 const FONT_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com'];
