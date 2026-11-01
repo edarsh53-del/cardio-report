@@ -10,6 +10,28 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="تقرير القلب">
+<script>
+// With the browser's "desktop site" option on, a phone ignores the viewport tag and lays the page
+// out about 980px wide, shrunk to fit. Scale it back to the phone's real width so the phone layout shows.
+(function () {
+  function fit() {
+    try {
+      var root = document.documentElement, coarse = matchMedia('(pointer:coarse)').matches;
+      var shortSide = Math.min(screen.width, screen.height), w = window.innerWidth;
+      if (coarse && shortSide < 600 && w > shortSide * 1.4) {
+        var z = w / screen.width;
+        root.style.zoom = z.toFixed(3);
+        // percentage heights get the zoom applied twice, so sheets size from this pixel height instead
+        root.style.setProperty('--app-h', Math.floor(window.innerHeight / z) + 'px');
+        root.classList.add('desk-mode');
+      }
+      else if (root.classList.contains('desk-mode')) { root.style.zoom = ''; root.style.removeProperty('--app-h'); root.classList.remove('desk-mode'); }
+    } catch (e) { /* leave the page as the browser laid it out */ }
+  }
+  fit();
+  window.addEventListener('orientationchange', function () { setTimeout(fit, 300); });
+})();
+</script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -316,6 +338,10 @@ textarea.input{padding:12px 14px;min-height:220px;line-height:1.6;resize:vertica
 body{margin:0}
 img{max-width:100%}
 [hidden]{display:none!important}
+
+/* phone browser in "desktop site" mode, scaled back by the script in <head> */
+.desk-mode .sheet{max-height:calc(var(--app-h) * .92)}
+.desk-mode .gate{min-height:var(--app-h)}
 
 /* connection bar */
 .net{background:var(--risk-soft);color:var(--ink);font-size:13px}
