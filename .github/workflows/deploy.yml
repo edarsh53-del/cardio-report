@@ -1,0 +1,28 @@
+# Publishes docs/ to Firebase Hosting (https://cardio-report.web.app) on every push to main.
+# Needs the repository secret FIREBASE_SERVICE_ACCOUNT (a service-account JSON key with the
+# Firebase Hosting Admin role). Until that secret exists, the run skips the deploy step.
+name: Deploy to Firebase Hosting
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      HAS_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy
+        if: env.HAS_KEY == 'true'
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: cardio-report
+          channelId: live
+      - name: Waiting for the deploy key
+        if: env.HAS_KEY != 'true'
+        run: echo "FIREBASE_SERVICE_ACCOUNT is not set yet, so nothing was deployed."
