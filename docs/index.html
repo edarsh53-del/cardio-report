@@ -343,6 +343,23 @@ body{margin:0}
 img{max-width:100%}
 [hidden]{display:none!important}
 
+/* typed numbers, transfusion and narcotic records, staff actions */
+.num-in{width:64px;border:0;background:var(--surface);color:var(--ink);text-align:center;font:inherit;font-weight:700;font-size:18px;font-variant-numeric:tabular-nums;padding:0}
+.num-short{width:120px;flex:none;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
+.bstate.danger{color:var(--danger)}
+.bstate.new{color:var(--accent)}
+.grid-2.eq{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.seg-sm{flex:none}
+.seg-sm button{min-height:42px;padding:0 10px;font-size:13.5px}
+.care-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.care-list li{display:flex;align-items:center;gap:6px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line);padding-inline-start:4px}
+.care-row{flex:1;min-width:0;text-align:start;border:0;background:none;padding:10px 8px;font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.staff-row{flex-wrap:wrap}
+.staff-row .pmain{flex:1}
+.staff-actions{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}
+.staff-reset{width:100%}
+@media (max-width:520px){.staff-actions{width:100%;justify-content:flex-start;padding-inline-start:40px}}
+
 /* phone browser in "desktop site" mode, scaled back by the script in <head> */
 .desk-mode .sheet{max-height:calc(var(--app-h) * .92)}
 .desk-mode .gate{min-height:var(--app-h)}
@@ -404,6 +421,6 @@ img{max-width:100%}
   <div id="sheet-root"></div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </div>
-<script type="module" src="app.js?v=20261101061929"></script>
+<script type="module" src="app.js?v=20261102061111"></script>
 </body>
 </html>

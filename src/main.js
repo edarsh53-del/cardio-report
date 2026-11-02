@@ -201,6 +201,39 @@ function newPatient(x) {
   return p;
 }
 const isHR = p => p.braden != null && p.braden <= 18;
+// Reads a typed number, accepting Arabic-Indic and Persian digits and a comma or Arabic decimal mark.
+// Returns null for an empty field and NaN for anything that is not a number.
+function toNum(v) {
+  const s = String(v ?? '').trim()
+    .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[۰-۹]/g, d => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+    .replace(/[٫,]/g, '.');
+  if (s === '') return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : NaN;
+}
+// Braden Scale bands: 6–9 very high, 10–12 high, 13–14 moderate, 15–18 mild, 19–23 no risk.
+function bradenLevel(n) {
+  if (n == null || isNaN(n)) return null;
+  if (n <= 9) return {label:'خطر عالٍ جداً', cls:'danger'};
+  if (n <= 12) return {label:'خطر عالٍ', cls:'danger'};
+  if (n <= 14) return {label:'خطر متوسط', cls:'risk'};
+  if (n <= 18) return {label:'خطر خفيف', cls:'risk'};
+  return {label:'لا يوجد خطر', cls:'new'};
+}
+const validBraden = n => Number.isInteger(n) && n >= 6 && n <= 23;
+const NARC_KNOWN = {Pethidine:'بيثدين', Morphine:'مورفين'};
+const unitsText = u => `${u} ${u >= 3 && u <= 10 ? 'وحدات' : 'وحدة'}`;
+function bloodLine(c) {
+  const parts = [unitsText(c.units)];
+  if (c.hgbBefore != null) parts.push(`HGB قبل ${c.hgbBefore}`);
+  if (c.hgbAfter != null) parts.push(`بعد ${c.hgbAfter}`);
+  return parts.join(' · ');
+}
+function narcLine(c, withDrug) {
+  const nurse = staffName(c.nurse), witness = staffName(c.witness);
+  return `${withDrug ? c.drug + ' ' : ''}${c.dose} ${c.unit}${c.time ? ' · ' + c.time : ''}${nurse ? ' · ح/ ' + nurse : ''}${witness ? ' · الشاهد: ح/ ' + witness : ''}`;
+}
 const who = p => p.gender === 'f' ? 'المريضة' : 'المريض';
 function staffName(id) {
   const a = state && state.staff.find(s => s.id === id);
@@ -262,8 +295,8 @@ function stopData() {
 }
 function startData() {
   session.started = true;
-  state = Object.assign(pickMain({}), {patients:[], events:[], notes:[], archive:[], staff:[], currentUser:session.uid});
-  const loaded = {main:false, patients:false, events:false, notes:false, staff:false};
+  state = Object.assign(pickMain({}), {patients:[], events:[], notes:[], care:[], archive:[], staff:[], currentUser:session.uid});
+  const loaded = {main:false, patients:false, events:false, notes:false, care:false, staff:false};
   const ready = () => {
     if (!session.ready && Object.values(loaded).every(Boolean)) { session.ready = true; session.retries = 0; showShell(); render(); }
     else if (session.ready) scheduleRender();
@@ -281,6 +314,7 @@ function startData() {
   });
   sub(wardColl('patients'), s => { state.patients = s.docs.map(d => newPatient(Object.assign({}, d.data(), {id:d.id}))); }, 'patients');
   sub(wardColl('events'), s => { state.events = s.docs.map(d => Object.assign({}, d.data(), {id:d.id})); }, 'events');
+  sub(wardColl('care'), s => { state.care = s.docs.map(d => Object.assign({}, d.data(), {id:d.id})).sort((a, b) => String(a.at).localeCompare(String(b.at))); }, 'care');
   sub(wardColl('notes'), s => { state.notes = s.docs.map(d => Object.assign({}, d.data(), {id:d.id})).sort((a, b) => String(a.at).localeCompare(String(b.at))); }, 'notes');
   sub(collection(db, 'staff'), s => { state.staff = s.docs.map(d => Object.assign({}, d.data(), {id:d.id})); }, 'staff');
   sub(query(wardColl('archive'), orderBy('at', 'desc'), limit(60)), s => { state.archive = s.docs.map(d => Object.assign({}, d.data(), {id:d.id})); });
@@ -320,7 +354,7 @@ onAuthStateChanged(auth, user => {
       if (!d && snap.metadata.fromCache) return; // wait for the server's answer
       stopData();
       session.me = null;
-      gate = {mode:'inactive'};
+      gate = {mode:'inactive', err: d && d.replacedBy ? 'غيّر المدير كلمة السر لهذا الحساب. سجّل الخروج ثم ادخل بنفس اسم المستخدم وكلمة السر الجديدة.' : ''};
       renderGate();
       return;
     }
@@ -347,7 +381,7 @@ async function decideGate() {
 /* ---------- writes: diff the local state, send one batch, keep the inverse for undo ---------- */
 const DEL = {__del: true};
 const byId = arr => { const m = {}; arr.forEach(x => { m[x.id] = clone(x); }); return m; };
-const snapState = () => ({patients:byId(state.patients), events:byId(state.events), notes:byId(state.notes), archive:byId(state.archive), main:clone(pickMain(state))});
+const snapState = () => ({patients:byId(state.patients), events:byId(state.events), notes:byId(state.notes), care:byId(state.care), archive:byId(state.archive), main:clone(pickMain(state))});
 function fieldDiff(x, y) {
   const keys = new Set([...Object.keys(x), ...Object.keys(y)]), before = {}, after = {};
   let n = 0;
@@ -363,7 +397,7 @@ function fieldDiff(x, y) {
 }
 function diffState(a, b) {
   const ops = [];
-  for (const coll of ['patients', 'events', 'notes', 'archive']) {
+  for (const coll of ['patients', 'events', 'notes', 'care', 'archive']) {
     const ids = new Set([...Object.keys(a[coll]), ...Object.keys(b[coll])]);
     ids.forEach(id => {
       const x = a[coll][id], y = b[coll][id];
@@ -519,8 +553,9 @@ function buildReport() {
 
   const hr = P.filter(isHR), oldH = hr.filter(p => !p.bradenNew), newH = hr.filter(p => p.bradenNew);
   L.push('⚠️🛡️ *سادساً: High-Risk Patients (Braden Scale)*', '');
-  L.push(`📋📊 الحالات القديمة (Old High-Risk): (${oldH.length})`); oldH.forEach((p, i) => L.push(`${i + 1}. ${p.name} (${p.braden})`));
-  L.push(`🍀 حالات الـ High-Risk الجديدة: (${newH.length})`); newH.forEach((p, i) => L.push(`${i + 1}. ${p.name} (${p.braden})`));
+  const hrLine = (p, i) => `${i + 1}. ${p.name} (${p.braden} · ${bradenLevel(p.braden).label})`;
+  L.push(`📋📊 الحالات القديمة (Old High-Risk): (${oldH.length})`); oldH.forEach((p, i) => L.push(hrLine(p, i)));
+  L.push(`🍀 حالات الـ High-Risk الجديدة: (${newH.length})`); newH.forEach((p, i) => L.push(hrLine(p, i)));
   L.push('', `🫴 إجمالي حالات الـ High risk: (${hr.length})`);
   L.push(sep);
 
@@ -531,7 +566,14 @@ function buildReport() {
 
   const k = S.counters;
   L.push('🩸💉 *ثامناً: العناية الدوائية ونقل الدم*', '');
-  L.push(`* 🩸 حالات نقل الدم: (${k.blood})`, `* 🟤 بيثدين: (${k.peth})`, `* 🟤 مورفين: (${k.morph})`);
+  const blood = S.care.filter(c => c.kind === 'blood'), narcs = S.care.filter(c => c.kind === 'narc');
+  L.push(`* 🩸 حالات نقل الدم: (${new Set(blood.map(c => c.pid)).size})`);
+  blood.forEach((c, i) => L.push(`${i + 1}. ${c.pname}: ${bloodLine(c)}`));
+  const narcGroup = (title, list, withDrug) => { L.push(`* 🟤 ${title}: (${list.length})`); list.forEach((c, i) => L.push(`${i + 1}. ${c.pname}: ${narcLine(c, withDrug)}`)); };
+  narcGroup('بيثدين', narcs.filter(c => c.drug === 'Pethidine'));
+  narcGroup('مورفين', narcs.filter(c => c.drug === 'Morphine'));
+  const otherNarcs = narcs.filter(c => !NARC_KNOWN[c.drug]);
+  if (otherNarcs.length) narcGroup('أدوية مخدرة أخرى', otherNarcs, true);
   L.push(sep);
   L.push(`🧺🧼 تحت المرضى 🤕: (${k.under})`, `👉 الشراشف المتسخة: (${k.dirty})`, `👉 الشراشف النظيفة: (${k.clean})`, `👉 إجمالي عدد الشراشف: (${k.under + k.dirty + k.clean})`);
   L.push(sep);
@@ -593,8 +635,11 @@ function tagsHtml(p) {
   const t = [];
   if (p.admitted) t.push(`<span class="tag new">دخول جديد · ${esc(p.source)}</span>`);
   if (p.cath) t.push('<span class="tag heart">في القسطرة</span>');
-  if (isHR(p)) t.push(`<span class="tag risk">Braden ${p.braden}${p.bradenNew ? ' · جديد' : ''}</span>`);
+  if (isHR(p)) t.push(`<span class="tag ${bradenLevel(p.braden).cls === 'danger' ? 'danger' : 'risk'}">Braden ${p.braden} · ${bradenLevel(p.braden).label}${p.bradenNew ? ' · جديد' : ''}</span>`);
   else if (p.braden != null) t.push(`<span class="tag">Braden ${p.braden}</span>`);
+  const cc = state.care.filter(c => c.pid === p.id);
+  if (cc.some(c => c.kind === 'blood')) t.push('<span class="tag heart">نقل دم</span>');
+  if (cc.some(c => c.kind === 'narc')) t.push('<span class="tag info">مخدر</span>');
   if (p.sores.length) t.push('<span class="tag sore">قرحة فراش</span>');
   if (p.air) t.push('<span class="tag sore-o">فرشة هوائية</span>');
   if (p.follow.on) t.push('<span class="tag follow">متابعة خاصة</span>');
@@ -661,6 +706,12 @@ function evRow(e) {
   const by = staffName(e.by);
   return `<li class="ev"><span class="tag ${c}">${t}</span><div class="ev-main"><b>${esc(e.p.name)}</b><small>${d ? esc(d) + ' · ' : ''}${fmtWhen(e.at)}${by ? ' · ح/ ' + esc(by) : ''}</small></div><button type="button" class="btn sm ghost" data-act="ev-undo" data-v="${e.id}">إلغاء</button></li>`;
 }
+function careRow(c) {
+  const here = state.patients.some(p => p.id === c.pid);
+  const tag = c.kind === 'blood' ? '<span class="tag heart">نقل دم</span>' : `<span class="tag info">${esc(NARC_KNOWN[c.drug] || c.drug)}</span>`;
+  const detail = c.kind === 'blood' ? bloodLine(c) : narcLine(c, !NARC_KNOWN[c.drug]);
+  return `<li class="ev">${tag}<div class="ev-main"><b>${esc(c.pname)}</b><small dir="auto">${esc(detail)}</small></div>${here ? `<button type="button" class="btn sm ghost" data-act="open" data-id="${c.pid}">فتح</button>` : ''}</li>`;
+}
 function counter(k, label) {
   return `<div class="counter"><span>${label}</span><div class="stepper"><button type="button" data-act="cnt" data-k="${k}" data-v="-1" aria-label="إنقاص ${label}">−</button><output>${state.counters[k]}</output><button type="button" data-act="cnt" data-k="${k}" data-v="1" aria-label="زيادة ${label}">+</button></div></div>`;
 }
@@ -674,7 +725,8 @@ function viewDay() {
   </section>
   <section class="sec">
     <h2>العناية الدوائية ونقل الدم</h2>
-    <div class="counters">${counter('blood', 'حالات نقل الدم')}${counter('peth', 'بيثدين')}${counter('morph', 'مورفين')}</div>
+    ${state.care.length ? `<ul class="events">${state.care.map(careRow).join('')}</ul>` : '<p class="empty">لا يوجد نقل دم أو أدوية مخدرة في هذه الفترة.</p>'}
+    <p class="hint" style="margin-top:8px">تُسجَّل من بطاقة المريض، في قسمي «نقل الدم» و«الأدوية المخدرة».</p>
   </section>
   <section class="sec">
     <h2>الشراشف</h2>
@@ -772,7 +824,8 @@ function sheetAdmit() {
     <div class="field"><span class="flabel">المكان</span><div class="seg">${segBtn('d-set', 'loc', 'dept', 'القسم', d.loc)}${segBtn('d-set', 'loc', 'hall', 'القاعة', d.loc)}</div></div>
     <div class="field"><span class="flabel">التخصص</span><div class="seg">${segBtn('d-set', 'spec', 'cardio', 'قلب', hall ? 'internal' : d.spec, hall)}${segBtn('d-set', 'spec', 'internal', 'باطنة', hall ? 'internal' : d.spec)}</div>${hall ? '<p class="hint">القاعة للباطنة فقط.</p>' : ''}</div>
     ${existing ? '' : `<div class="field"><span class="flabel">قادم من</span><div class="chips">${SOURCES.map(s => chip(esc(s), d.source === s, 'd-set', s, 'data-k="source"')).join('')}</div></div>`}
-    <div class="field"><span class="flabel">Braden <span class="hint">(اختياري، ويمكن إضافته لاحقاً)</span></span><div class="chips tight">${[10,11,12,13,14,15,16,17,18].map(n => chip(n, d.braden === n, 'd-set', n, 'data-k="braden"')).join('')}</div></div>
+    <div class="field"><label class="flabel" for="ad-braden">Braden <span class="hint">(اختياري، من 6 إلى 23)</span></label>
+      <div class="braden"><input id="ad-braden" class="input num-short" inputmode="numeric" data-draft="bradenText" value="${esc(d.bradenText || '')}" placeholder="مثلاً 16" autocomplete="off">${d.bradenText ? bradenBadge(toNum(d.bradenText), 'ad-level') : '<span id="ad-level" class="bstate"></span>'}</div></div>
     <div class="switches">${sw('Urinary Foley Catheter', 'd-set', 'foley', d.foley)}${sw('Central line', 'd-set', 'cl', d.cl)}</div>
     ${ui.admitErr ? `<p class="err" role="alert">${esc(ui.admitErr)}</p>` : ''}
     <button type="button" class="btn primary lg block" data-act="admit-save">${existing ? 'إضافة المريض' : 'تسجيل الدخول'}</button>
@@ -820,6 +873,56 @@ function followEditor(p) {
     <div class="field"><label class="flabel" for="pf-other">Others</label><input id="pf-other" class="input" dir="auto" data-pfield="other" value="${esc(f.other)}" placeholder="أي متابعة أخرى" autocomplete="off"></div>
     <div class="field"><span class="flabel">كما سيظهر في التقرير</span><div class="preview ${lines.length ? '' : 'muted'}">${lines.length ? lines.map(esc).join('<br>') : 'اختر من الأعلى'}</div></div>`;
 }
+function bradenBadge(n, id) {
+  const lvl = validBraden(n) ? bradenLevel(n) : null;
+  return `<span id="${id}" class="bstate ${lvl ? lvl.cls : ''}">${lvl ? lvl.label : 'اكتب الرقم'}</span>`;
+}
+function careSections(p) {
+  const mine = state.care.filter(c => c.pid === p.id);
+  const blood = mine.filter(c => c.kind === 'blood'), narcs = mine.filter(c => c.kind === 'narc');
+  const row = (c, text) => `<li><button type="button" class="care-row" data-act="care-edit" data-v="${c.id}" dir="auto">${esc(text)}</button><button type="button" class="icon-btn" data-act="care-del" data-v="${c.id}" aria-label="حذف">${ICON.trash}</button></li>`;
+  const editing = kind => ui.careDraft && ui.careDraft.kind === kind;
+  return `
+  <section class="blk">
+    <h4>نقل الدم</h4>
+    ${blood.length ? `<ul class="care-list">${blood.map(c => row(c, bloodLine(c))).join('')}</ul><p class="hint">اضغط على السطر لإضافة HGB بعد النقل أو التعديل.</p>` : ''}
+    ${editing('blood') ? bloodEditor() : '<button type="button" class="btn block dashed" data-act="care-new" data-v="blood">+ نقل دم</button>'}
+  </section>
+  <section class="blk">
+    <h4>الأدوية المخدرة</h4>
+    ${narcs.length ? `<ul class="care-list">${narcs.map(c => row(c, narcLine(c, true))).join('')}</ul>` : ''}
+    ${editing('narc') ? narcEditor() : '<button type="button" class="btn block dashed" data-act="care-new" data-v="narc">+ دواء مخدر</button>'}
+  </section>`;
+}
+function bloodEditor() {
+  const d = ui.careDraft;
+  return `<div class="inline-box">
+    <div class="field"><span class="flabel">عدد وحدات الدم</span>
+      <div class="stepper"><button type="button" data-act="bd-units" data-v="-1" aria-label="إنقاص">−</button><output>${d.units}</output><button type="button" data-act="bd-units" data-v="1" aria-label="زيادة">+</button></div></div>
+    <div class="grid-2 eq">
+      <div class="field"><label class="flabel" for="cd-before">HGB قبل النقل</label><input id="cd-before" class="input" inputmode="decimal" dir="ltr" data-cd="before" value="${esc(d.before)}" placeholder="g/dL" autocomplete="off"></div>
+      <div class="field"><label class="flabel" for="cd-after">HGB بعد النقل</label><input id="cd-after" class="input" inputmode="decimal" dir="ltr" data-cd="after" value="${esc(d.after)}" placeholder="لاحقاً" autocomplete="off"></div>
+    </div>
+    ${ui.careErr ? `<p class="err">${esc(ui.careErr)}</p>` : ''}
+    <div class="row-btns"><button type="button" class="btn primary" data-act="care-save">حفظ</button><button type="button" class="btn" data-act="care-cancel">إلغاء</button></div>
+  </div>`;
+}
+function narcEditor() {
+  const d = ui.careDraft, pool = teamPool().slice().sort((a, b) => (state.team.includes(b.id) - state.team.includes(a.id)));
+  return `<div class="inline-box">
+    <div class="field"><span class="flabel">الدواء</span>
+      <div class="chips">${chip('Pethidine · بيثدين', d.drug === 'Pethidine', 'cd-drug', 'Pethidine')}${chip('Morphine · مورفين', d.drug === 'Morphine', 'cd-drug', 'Morphine')}${chip('دواء آخر', d.drug === 'other', 'cd-drug', 'other')}</div>
+      ${d.drug === 'other' ? `<input id="cd-other" class="input" dir="ltr" data-cd="other" value="${esc(d.other)}" placeholder="Drug name" autocomplete="off" aria-label="اسم الدواء">` : ''}</div>
+    <div class="grid-2 eq">
+      <div class="field"><label class="flabel" for="cd-dose">الجرعة</label><div class="addrow"><input id="cd-dose" class="input" inputmode="decimal" dir="ltr" data-cd="dose" value="${esc(d.dose)}" placeholder="50" autocomplete="off"><div class="seg seg-sm">${segBtn('cd-unit', 'u', 'mg', 'mg', d.unit)}${segBtn('cd-unit', 'u', 'mcg', 'mcg', d.unit)}</div></div></div>
+      <div class="field"><label class="flabel" for="cd-time">الوقت</label><input id="cd-time" class="input" type="time" dir="ltr" data-cd="time" value="${esc(d.time)}"></div>
+    </div>
+    <div class="field"><span class="flabel">الممرض/ة الذي أعطى الجرعة</span><div class="chips">${pool.map(s => chip('ح/ ' + esc(s.name), d.nurse === s.id, 'cd-nurse', s.id)).join('')}</div></div>
+    <div class="field"><span class="flabel">الشاهد</span><div class="chips">${pool.filter(s => s.id !== d.nurse).map(s => chip('ح/ ' + esc(s.name), d.witness === s.id, 'cd-witness', s.id)).join('') || '<p class="hint">أضف أسماء الطاقم من تبويب «اليوم».</p>'}</div></div>
+    ${ui.careErr ? `<p class="err">${esc(ui.careErr)}</p>` : ''}
+    <div class="row-btns"><button type="button" class="btn primary" data-act="care-save">حفظ</button><button type="button" class="btn" data-act="care-cancel">إلغاء</button></div>
+  </div>`;
+}
 function sheetPatient(p) {
   const specT = p.spec === 'cardio' ? 'قلب' : 'باطنة' + (p.sub ? ` (${esc(p.sub)})` : '');
   const exitBtn = (v, t, s, cls) => `<button type="button" class="btn ${cls || ''}" data-act="p-exit" data-v="${v}" aria-pressed="${ui.exitMode === v}"><b>${t}</b>${s ? `<small>${s}</small>` : ''}</button>`;
@@ -861,16 +964,17 @@ function sheetPatient(p) {
     <h4>العناية</h4>
     <div class="switches">${sw('Urinary Foley Catheter', 'p-toggle', 'foley', p.foley)}${sw('Central line', 'p-toggle', 'cl', p.cl)}${sw('فرشة هوائية', 'p-toggle', 'air', p.air)}</div>
   </section>
+  ${careSections(p)}
   <section class="blk">
     <h4>Braden Scale</h4>
     <div class="braden">
-      <div class="stepper"><button type="button" data-act="p-braden" data-v="-1" aria-label="إنقاص">−</button><output>${p.braden ?? '–'}</output><button type="button" data-act="p-braden" data-v="1" aria-label="زيادة">+</button></div>
-      <span class="bstate ${isHR(p) ? 'risk' : ''}">${p.braden == null ? 'غير مسجل' : isHR(p) ? 'High risk' : 'ليس High risk'}</span>
+      <div class="stepper"><button type="button" data-act="p-braden" data-v="-1" aria-label="إنقاص">−</button><input id="pb-braden" class="num-in" inputmode="numeric" autocomplete="off" value="${p.braden ?? ''}" placeholder="–" aria-label="رقم Braden"><button type="button" data-act="p-braden" data-v="1" aria-label="زيادة">+</button></div>
+      ${bradenBadge(p.braden, 'pb-level')}
       ${p.braden != null ? '<button type="button" class="btn sm ghost" data-act="p-braden-clear">مسح</button>' : ''}
     </div>
-    <div class="chips tight">${[10,11,12,13,14,15,16,17,18].map(n => chip(n, p.braden === n, 'p-braden-set', n)).join('')}</div>
+    ${ui.bradenErr ? `<p class="err">${esc(ui.bradenErr)}</p>` : ''}
     ${isHR(p) ? `<div class="seg">${segBtn('p-bnew', 'n', '1', 'حالة جديدة', p.bradenNew ? '1' : '0')}${segBtn('p-bnew', 'n', '0', 'حالة قديمة', p.bradenNew ? '1' : '0')}</div>` : ''}
-    <p class="hint">18 أو أقل = High risk، ويُضاف للتقرير تلقائياً.</p>
+    <p class="hint">اكتب الرقم من 6 إلى 23. من 18 وأقل يدخل قائمة High risk في التقرير.</p>
   </section>
   <section class="blk">
     <h4>قرح الفراش</h4>
@@ -893,7 +997,7 @@ function sheetPatient(p) {
   </section>`;
 }
 function sheetAccount() {
-  const m = me(), u = auth.currentUser, uname = u && u.email ? u.email.split('@')[0] : '';
+  const m = me(), u = auth.currentUser, uname = m.username || (u && u.email ? u.email.split('@')[0].split('+')[0] : '');
   return `${head('ح/ ' + esc(m.name), `<span dir="ltr">${esc(uname)}</span> · ${m.role === 'admin' ? 'مدير' : 'حكيم/ة'}`, `<span class="avatar">${esc((m.name || '?').charAt(0))}</span>`)}
   ${isAdmin() ? `<section class="blk"><h4>المدير</h4><button type="button" class="btn primary block" data-act="staff-open">إدارة الطاقم والحسابات</button></section>` : ''}
   <section class="blk">
@@ -910,7 +1014,8 @@ function sheetAccount() {
   </section>`;
 }
 function sheetStaff() {
-  const n = ui.nf, list = state.staff.slice().sort((a, b) => (b.active - a.active) || String(a.name).localeCompare(String(b.name), 'ar'));
+  const n = ui.nf, r = ui.reset;
+  const list = state.staff.filter(x => !x.replacedBy).sort((a, b) => (b.active - a.active) || String(a.name).localeCompare(String(b.name), 'ar'));
   return `${head('إدارة الطاقم', 'حسابات الدخول إلى البرنامج')}
   <section class="blk">
     <h4>إضافة حكيم/ة</h4>
@@ -922,17 +1027,27 @@ function sheetStaff() {
     <p class="hint">اسم المستخدم بالإنجليزي: حروف صغيرة وأرقام، 3 أحرف أو أكثر.</p>
     <div class="field"><span class="flabel">الصلاحية</span><div class="seg">${segBtn('nf-role', 'r', 'nurse', 'حكيم/ة', n.role)}${segBtn('nf-role', 'r', 'admin', 'مدير', n.role)}</div></div>
     ${n.err ? `<p class="err">${esc(n.err)}</p>` : ''}
-    ${n.msg ? `<div class="inline-box"><p class="okmsg">${esc(n.msg.title)}</p><div class="cred">user: ${esc(n.msg.user)}<br>password: ${esc(n.msg.pass)}</div><p class="hint">أعطِ هذه البيانات للحكيم/ة، ويمكنه تغيير كلمة السر من حسابه.</p></div>` : ''}
+    ${n.msg && !n.msg.reset ? `<div class="inline-box"><p class="okmsg">${esc(n.msg.title)}</p><div class="cred">user: ${esc(n.msg.user)}<br>password: ${esc(n.msg.pass)}</div><p class="hint">أعطِ هذه البيانات للحكيم/ة، ويمكنه تغيير كلمة السر من حسابه.</p></div>` : ''}
     <button type="button" class="btn primary block" data-act="nf-create" ${n.busy ? 'disabled' : ''}>${n.busy ? 'جارٍ الإنشاء…' : 'إنشاء الحساب'}</button>
   </section>
   <section class="blk">
     <h4>الحسابات (${list.length})</h4>
+    ${n.msg && n.msg.reset ? `<div class="inline-box"><p class="okmsg">${esc(n.msg.title)}</p><div class="cred">user: ${esc(n.msg.user)}<br>password: ${esc(n.msg.pass)}</div><p class="hint">أعطِ كلمة السر الجديدة للحكيم/ة. اسم المستخدم لم يتغيّر، والدخول بكلمة السر القديمة توقف.</p></div>` : ''}
     <div class="list">${list.map(s => {
       const self = s.id === session.uid;
-      return `<div class="staff-row ${s.active ? '' : 'off'}"><span class="avatar">${esc((s.name || '?').charAt(0))}</span><span class="pmain"><span class="pname">${esc(s.name)}${s.role === 'admin' ? ' <span class="tag new">مدير</span>' : ''}</span><small>${esc(s.username || '')}</small></span>
-        ${self ? '<span class="tag">أنت</span>' : `<button type="button" class="btn sm" data-act="st-role" data-v="${s.id}">${s.role === 'admin' ? 'إلغاء المدير' : 'اجعله مدير'}</button><button type="button" class="btn sm ${s.active ? 'danger-text' : ''}" data-act="st-active" data-v="${s.id}">${s.active ? 'إيقاف' : 'تفعيل'}</button>`}</div>`;
+      const actions = self ? '<span class="tag">أنت · غيّر كلمة سرك من «حسابي»</span>' : `
+        <button type="button" class="btn sm" data-act="rs-open" data-v="${s.id}" ${s.active ? '' : 'disabled'}>كلمة سر جديدة</button>
+        <button type="button" class="btn sm" data-act="st-role" data-v="${s.id}">${s.role === 'admin' ? 'إلغاء المدير' : 'اجعله مدير'}</button>
+        <button type="button" class="btn sm ${s.active ? 'danger-text' : ''}" data-act="st-active" data-v="${s.id}">${s.active ? 'إيقاف' : 'تفعيل'}</button>`;
+      const form = r && r.id === s.id ? `<div class="inline-box staff-reset">
+        <label class="flabel" for="rs-pass">كلمة السر الجديدة لـ ${esc(s.name)}</label>
+        <input id="rs-pass" class="input" data-rs="pass" value="${esc(r.pass)}" dir="ltr" autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="6 أحرف أو أكثر">
+        ${r.err ? `<p class="err">${esc(r.err)}</p>` : ''}
+        <div class="row-btns"><button type="button" class="btn primary" data-act="rs-save" ${r.busy ? 'disabled' : ''}>${r.busy ? 'جارٍ الحفظ…' : 'حفظ كلمة السر'}</button><button type="button" class="btn" data-act="rs-cancel">إلغاء</button></div>
+      </div>` : '';
+      return `<div class="staff-row ${s.active ? '' : 'off'}"><span class="avatar">${esc((s.name || '?').charAt(0))}</span><span class="pmain"><span class="pname">${esc(s.name)}${s.role === 'admin' ? ' <span class="tag new">مدير</span>' : ''}</span><small>${esc(s.username || '')}</small></span><div class="staff-actions">${actions}</div>${form}</div>`;
     }).join('')}</div>
-    <p class="hint">إذا نسي حكيم كلمة السر: أوقف حسابه القديم وأنشئ له حساباً جديداً باسم مستخدم آخر.</p>
+    <p class="hint">إذا نسي حكيم كلمة السر: اضغط «كلمة سر جديدة» بجانب اسمه، وأعطه الكلمة الجديدة. اسم المستخدم يبقى كما هو.</p>
   </section>`;
 }
 function sheetArchive(a) {
@@ -1013,7 +1128,7 @@ function renderSheet(inRender) {
   restoreFocus(f);
 }
 function openSheet(s) {
-  Object.assign(ui, {sheet:s, sheetNew:true, exitMode:null, trDest:'', trErr:'', soreDraft:null, specPick:false, delConfirm:false, admitErr:'', dupOk:false, pumpErr:'', logoutConfirm:false});
+  Object.assign(ui, {sheet:s, sheetNew:true, exitMode:null, trDest:'', trErr:'', soreDraft:null, specPick:false, delConfirm:false, admitErr:'', dupOk:false, pumpErr:'', logoutConfirm:false, careDraft:null, careErr:'', bradenErr:'', reset:null});
   ui.pw = {err:'', msg:'', busy:false};
   renderSheet();
 }
@@ -1084,7 +1199,7 @@ async function doLogin() {
   if (!u || !p) return gateError('اكتب اسم المستخدم وكلمة السر.');
   if (!USER_RE.test(u)) return gateError('اسم المستخدم أو كلمة السر غير صحيحة.');
   gateBusy();
-  try { await signInWithEmailAndPassword(auth, emailOf(u), p); }
+  try { await signInWithEmailAndPassword(auth, await emailForLogin(u), p); }
   catch (e) { gateError(authMsg(e)); }
 }
 async function doSetup() {
@@ -1111,13 +1226,13 @@ async function doSetup() {
 
 /* ---------- account and staff actions ---------- */
 let secondaryAuth = null;
-async function createAccount(username, password) {
+async function createAccount(email, password) {
   if (!secondaryAuth) {
     const app2 = initializeApp(firebaseConfig, 'staff-creator');
     secondaryAuth = initializeAuth(app2, {persistence: inMemoryPersistence});
     if (__EMULATOR__) connectAuthEmulator(secondaryAuth, 'http://127.0.0.1:9099', {disableWarnings: true});
   }
-  const cred = await createUserWithEmailAndPassword(secondaryAuth, emailOf(username), password);
+  const cred = await createUserWithEmailAndPassword(secondaryAuth, email, password);
   const id = cred.user.uid;
   await signOut(secondaryAuth);
   return id;
@@ -1135,11 +1250,47 @@ async function createStaff() {
   if (!navigator.onLine) return fail('إنشاء الحسابات يحتاج اتصالاً بالإنترنت.');
   n.busy = true; n.err = ''; renderSheet();
   try {
-    const id = await createAccount(n.user, n.pass);
+    const id = await createAccount(emailOf(n.user), n.pass);
     await setDoc(doc(db, 'staff', id), {name:n.name, username:n.user, role:n.role, active:true, createdAt:nowIso(), createdBy:session.uid});
     ui.nf = {role:'nurse', name:'', user:'', pass:'', busy:false, err:'', msg:{title:`تم إنشاء حساب ${n.name}.`, user:n.user, pass:n.pass}};
     renderSheet();
   } catch (e) { fail(authMsg(e)); }
+}
+async function resetPassword() {
+  const r = ui.reset, s = r && state.staff.find(x => x.id === r.id);
+  if (!s) return;
+  r.pass = $('rs-pass') ? $('rs-pass').value : r.pass;
+  const fail = m => { r.err = m; r.busy = false; renderSheet(); };
+  if (r.pass.length < 6) return fail('كلمة السر 6 أحرف أو أكثر.');
+  if (!navigator.onLine) return fail('تغيير كلمة السر يحتاج اتصالاً بالإنترنت.');
+  if (!s.username) return fail('لا يوجد اسم مستخدم لهذا الحساب.');
+  r.busy = true; r.err = ''; renderSheet();
+  try {
+    const n = (s.resets || 0) + 1;
+    const email = `${s.username}+r${n}@${EMAIL_DOMAIN}`;
+    const newId = await createAccount(email, r.pass);
+    const b = writeBatch(db);
+    b.set(doc(db, 'staff', newId), {name:s.name, username:s.username, role:s.role, active:true, createdAt:nowIso(), createdBy:session.uid, resets:n, replaces:s.id});
+    b.set(doc(db, 'staff', s.id), {active:false, replacedBy:newId}, {merge:true});
+    b.set(doc(db, 'logins', s.username), {email, uid:newId});
+    await b.commit();
+    // keep today's team and responsible nurse pointing at the same person
+    commit(() => {
+      state.team = state.team.map(x => x === s.id ? newId : x);
+      if (state.responsible === s.id) state.responsible = newId;
+    });
+    ui.reset = null;
+    ui.nf = Object.assign({}, ui.nf, {msg:{reset:true, title:`تم تغيير كلمة السر لـ ${s.name}.`, user:s.username, pass:r.pass}});
+    renderSheet();
+  } catch (e) { fail(authMsg(e)); }
+}
+// The username a person types maps to the sign-in that is current after any password resets.
+async function emailForLogin(u) {
+  try {
+    const m = await getDoc(doc(db, 'logins', u));
+    if (m.exists() && m.data().email) return m.data().email;
+  } catch (e) { /* offline or no mapping yet: use the original sign-in */ }
+  return emailOf(u);
 }
 function updateStaff(id, fields) {
   setDoc(doc(db, 'staff', id), fields, {merge:true}).catch(e => showToast('لم يُحفظ: ' + authMsg(e)));
@@ -1190,12 +1341,15 @@ function admitSave() {
   const existing = draft.mode === 'existing';
   if (!name) { ui.admitErr = 'اكتب اسم المريض.'; renderSheet(); if ($('ad-name')) $('ad-name').focus(); return; }
   if (!draft.gender) { ui.admitErr = 'اختر رجل أو امرأة.'; renderSheet(); return; }
+  if ($('ad-braden')) draft.bradenText = $('ad-braden').value;
+  const bn = toNum(draft.bradenText);
+  if (bn !== null && !validBraden(bn)) { ui.admitErr = 'Braden رقم صحيح من 6 إلى 23.'; renderSheet(); return; }
   if (!ui.dupOk && state.patients.some(p => norm(p.name) === norm(name))) {
     ui.admitErr = 'يوجد مريض بنفس الاسم في القسم. اضغط الزر مرة ثانية إذا كنت متأكداً.';
     ui.dupOk = true; renderSheet(); return;
   }
   const p = newPatient({name, bed:draft.bed, gender:draft.gender, loc:draft.loc, spec:draft.loc === 'hall' ? 'internal' : draft.spec, source:existing ? '' : draft.source, admitted:!existing, foley:draft.foley, cl:draft.cl});
-  if (draft.braden != null) { p.braden = draft.braden; p.bradenNew = !existing && isHR(p); }
+  if (bn !== null) { p.braden = bn; p.bradenNew = !existing && isHR(p); }
   touch(p);
   ui.sheet = null;
   const keepMode = draft.mode;
@@ -1206,10 +1360,39 @@ function admitSave() {
   }, existing ? `تمت إضافة: ${name}` : `تم تسجيل دخول: ${name}`);
   if (keepMode === 'existing') {
     // adding the current census is a run of entries: reopen the form, keeping place and specialty
-    draft = {mode:'existing', name:'', bed:'', loc:draft.loc, spec:draft.spec, gender:null, source:'ER', braden:null, foley:false, cl:false};
+    draft = {mode:'existing', name:'', bed:'', loc:draft.loc, spec:draft.spec, gender:null, source:'ER', bradenText:'', foley:false, cl:false};
     openSheet({type:'admit'});
     setTimeout(() => { const n = $('ad-name'); if (n) n.focus(); }, 80);
   }
+}
+function saveCare() {
+  const p = cur(), d = ui.careDraft;
+  if (!p || !d) return;
+  const fail = m => { ui.careErr = m; renderSheet(); };
+  document.querySelectorAll('[data-cd]').forEach(i => { d[i.dataset.cd] = i.value; });
+  const existing = d.id ? state.care.find(c => c.id === d.id) : null;
+  let rec;
+  if (d.kind === 'blood') {
+    const before = toNum(d.before), after = toNum(d.after);
+    const okH = v => v === null || (v > 0 && v < 30);
+    if (Number.isNaN(before) || Number.isNaN(after) || !okH(before) || !okH(after)) return fail('اكتب HGB رقماً صحيحاً، مثل 7.5');
+    rec = {kind:'blood', units:d.units, hgbBefore:before, hgbAfter:after};
+  } else {
+    const drug = d.drug === 'other' ? String(d.other || '').trim() : d.drug;
+    const dose = toNum(d.dose);
+    if (!drug) return fail('اكتب اسم الدواء.');
+    if (dose === null || Number.isNaN(dose) || dose <= 0) return fail('اكتب كمية الجرعة.');
+    if (!d.nurse) return fail('اختر الممرض/ة الذي أعطى الجرعة.');
+    if (!d.witness) return fail('اختر الشاهد.');
+    if (d.witness === d.nurse) return fail('الشاهد يجب أن يكون شخصاً آخر غير الذي أعطى الجرعة.');
+    rec = {kind:'narc', drug, dose, unit:d.unit, time:d.time || '', nurse:d.nurse, witness:d.witness};
+  }
+  ui.careDraft = null;
+  ui.careErr = '';
+  commit(() => {
+    if (existing) Object.assign(existing, rec, {pname:p.name, editedBy:session.uid, editedAt:nowIso()});
+    else state.care.push(Object.assign({id:'c' + uid(), pid:p.id, pname:p.name, gender:p.gender, at:nowIso(), by:session.uid}, rec));
+  }, existing ? 'تم تعديل السجل' : (rec.kind === 'blood' ? 'تم تسجيل نقل الدم' : 'تم تسجيل الدواء المخدر'));
 }
 function revertEvent(id) {
   const e = state.events.find(x => x.id === id); if (!e) return;
@@ -1247,7 +1430,7 @@ const H = {
   open: el => openSheet({type:'patient', id:el.dataset.id}),
   'close-sheet': closeSheet,
   'admit-open': el => {
-    draft = {mode:el.dataset.v === 'existing' ? 'existing' : 'new', name:'', bed:'', loc:'dept', spec:'cardio', gender:null, source:'ER', braden:null, foley:false, cl:false};
+    draft = {mode:el.dataset.v === 'existing' ? 'existing' : 'new', name:'', bed:'', loc:'dept', spec:'cardio', gender:null, source:'ER', bradenText:'', foley:false, cl:false};
     openSheet({type:'admit'});
     setTimeout(() => { const n = $('ad-name'); if (n) n.focus(); }, 80);
   },
@@ -1255,6 +1438,7 @@ const H = {
     const k = el.dataset.k, v = el.dataset.v;
     if ($('ad-name')) draft.name = $('ad-name').value;
     if ($('ad-bed')) draft.bed = $('ad-bed').value;
+    if ($('ad-braden')) draft.bradenText = $('ad-braden').value;
     if (k === 'foley' || k === 'cl') draft[k] = !draft[k];
     else if (k === 'braden') draft.braden = draft.braden === +v ? null : +v;
     else draft[k] = v;
@@ -1297,9 +1481,36 @@ const H = {
   'spec-cancel': () => { ui.specPick = false; renderSheet(); },
   'p-shared': el => withP(p => { p.shared = el.dataset.v; }),
   'p-gender': el => withP(p => { p.gender = el.dataset.v; }),
-  'p-braden': el => withP(p => { setBraden(p, p.braden == null ? 18 : p.braden + (+el.dataset.v)); }),
+  'p-braden': el => { ui.bradenErr = ''; withP(p => { setBraden(p, p.braden == null ? 18 : p.braden + (+el.dataset.v)); }); },
   'p-braden-set': el => withP(p => { setBraden(p, p.braden === +el.dataset.v ? null : +el.dataset.v); }),
-  'p-braden-clear': () => withP(p => setBraden(p, null)),
+  'p-braden-clear': () => { ui.bradenErr = ''; withP(p => setBraden(p, null)); },
+  'care-new': el => {
+    const kind = el.dataset.v, d = new Date();
+    ui.careErr = '';
+    ui.careDraft = kind === 'blood'
+      ? {kind, id:null, units:1, before:'', after:''}
+      : {kind, id:null, drug:'Pethidine', other:'', dose:'', unit:'mg', time:`${pad(d.getHours())}:${pad(d.getMinutes())}`, nurse:session.uid, witness:null};
+    renderSheet();
+  },
+  'care-edit': el => {
+    const c = state.care.find(x => x.id === el.dataset.v); if (!c) return;
+    ui.careErr = '';
+    ui.careDraft = c.kind === 'blood'
+      ? {kind:'blood', id:c.id, units:c.units, before:c.hgbBefore ?? '', after:c.hgbAfter ?? ''}
+      : {kind:'narc', id:c.id, drug:NARC_KNOWN[c.drug] ? c.drug : 'other', other:NARC_KNOWN[c.drug] ? '' : c.drug, dose:String(c.dose), unit:c.unit, time:c.time || '', nurse:c.nurse, witness:c.witness};
+    renderSheet();
+  },
+  'care-cancel': () => { ui.careDraft = null; ui.careErr = ''; renderSheet(); },
+  'care-del': el => {
+    const c = state.care.find(x => x.id === el.dataset.v); if (!c) return;
+    commit(() => { state.care = state.care.filter(x => x.id !== c.id); }, c.kind === 'blood' ? 'تم حذف نقل الدم' : 'تم حذف الدواء المخدر');
+  },
+  'bd-units': el => { ui.careDraft.units = clamp(ui.careDraft.units + (+el.dataset.v), 1, 20); renderSheet(); },
+  'cd-drug': el => { ui.careDraft.drug = el.dataset.v; renderSheet(); },
+  'cd-unit': el => { ui.careDraft.unit = el.dataset.v; renderSheet(); },
+  'cd-nurse': el => { ui.careDraft.nurse = el.dataset.v; if (ui.careDraft.witness === el.dataset.v) ui.careDraft.witness = null; renderSheet(); },
+  'cd-witness': el => { ui.careDraft.witness = el.dataset.v; renderSheet(); },
+  'care-save': () => saveCare(),
   'p-bnew': el => withP(p => { p.bradenNew = el.dataset.v === '1'; }),
   'sore-new': () => { ui.soreDraft = {degree:null, sites:[], isNew:true}; renderSheet(); },
   'sd-degree': el => { ui.soreDraft.degree = el.dataset.v; renderSheet(); },
@@ -1382,6 +1593,7 @@ const H = {
       state.events = [];
       state.patients.forEach(p => { p.admitted = false; p.bradenNew = false; p.sores.forEach(s => { s.isNew = false; }); });
       state.counters = Object.assign({}, state.counters, {blood:0, peth:0, morph:0});
+      state.care = [];
       state.notes = state.notes.filter(n => n.pinned);
       state.periodStart = nowIso();
     }, 'تم إصدار التقرير وحفظه في الأرشيف');
@@ -1391,6 +1603,9 @@ const H = {
   'staff-open': () => { ui.nf = {role:'nurse', name:'', user:'', pass:'', busy:false, err:'', msg:''}; openSheet({type:'staff'}); },
   'nf-role': el => { ui.nf.role = el.dataset.v; renderSheet(); },
   'nf-create': () => createStaff(),
+  'rs-open': el => { ui.reset = {id:el.dataset.v, pass:'', busy:false, err:''}; ui.nf.msg = ''; renderSheet(); setTimeout(() => { const i = $('rs-pass'); if (i) i.focus(); }, 60); },
+  'rs-cancel': () => { ui.reset = null; renderSheet(); },
+  'rs-save': () => resetPassword(),
   'st-active': el => { const s = state.staff.find(x => x.id === el.dataset.v); if (s && s.id !== session.uid) updateStaff(s.id, {active:!s.active}); },
   'st-role': el => { const s = state.staff.find(x => x.id === el.dataset.v); if (s && s.id !== session.uid) updateStaff(s.id, {role:s.role === 'admin' ? 'nurse' : 'admin'}); },
   'pw-change': () => changePassword(),
@@ -1426,9 +1641,29 @@ document.addEventListener('input', e => {
   if (t.dataset && t.dataset.draft && draft) { draft[t.dataset.draft] = t.value; if (t.dataset.draft === 'name') ui.dupOk = false; }
   if (t.dataset && t.dataset.nf) ui.nf[t.dataset.nf] = t.value;
   if (t.id === 'tr-dest') ui.trDest = t.value;
+  if (t.dataset && t.dataset.cd && ui.careDraft) ui.careDraft[t.dataset.cd] = t.value;
+  if (t.dataset && t.dataset.rs && ui.reset) ui.reset[t.dataset.rs] = t.value;
+  if (t.id === 'pb-braden' || t.id === 'ad-braden') {
+    const n = toNum(t.value), lvl = validBraden(n) ? bradenLevel(n) : null, el = $(t.id === 'pb-braden' ? 'pb-level' : 'ad-level');
+    if (el) { el.textContent = lvl ? lvl.label : (t.value.trim() ? 'من 6 إلى 23' : (t.id === 'pb-braden' ? 'اكتب الرقم' : '')); el.className = 'bstate ' + (lvl ? lvl.cls : (t.value.trim() ? 'danger' : '')); }
+  }
 });
 document.addEventListener('change', e => {
-  const t = e.target, f = t.dataset && t.dataset.pfield; if (!f) return;
+  const t = e.target;
+  if (t.id === 'pb-braden') {
+    const p = cur(); if (!p) return;
+    const n = toNum(t.value);
+    if (n === null) {
+      ui.bradenErr = '';
+      if (p.braden != null) commit(() => { const q = cur(); setBraden(q, null); touch(q); }, null, true);
+      return;
+    }
+    if (!validBraden(n)) { ui.bradenErr = 'اكتب رقماً صحيحاً من 6 إلى 23.'; scheduleRender(); return; }
+    ui.bradenErr = '';
+    if (n !== p.braden) commit(() => { const q = cur(); setBraden(q, n); touch(q); }, null, true);
+    return;
+  }
+  const f = t.dataset && t.dataset.pfield; if (!f) return;
   const p = cur(); if (!p) return;
   const v = t.value.trim();
   if (f === 'name' && !v) { t.value = p.name; return; }
@@ -1439,7 +1674,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && ui.sheet) { closeSheet(); return; }
   if (e.key !== 'Enter') return;
   const id = e.target.id;
-  const map = {'ad-name':'admit-save', 'ad-bed':'admit-save', 'note-input':'note-add', 'staff-input':'staff-add', 'sd-custom':'sd-custom', 'tr-dest':'transfer-confirm', 'pump-rate':'pump-add', 'pump-med':'pump-add', 'pw-new':'pw-change'};
+  if (id === 'pb-braden') { e.preventDefault(); e.target.blur(); return; }
+  const map = {'ad-name':'admit-save', 'ad-bed':'admit-save', 'ad-braden':'admit-save', 'cd-before':'care-save', 'cd-after':'care-save', 'cd-dose':'care-save', 'cd-other':'care-save', 'rs-pass':'rs-save', 'note-input':'note-add', 'staff-input':'staff-add', 'sd-custom':'sd-custom', 'tr-dest':'transfer-confirm', 'pump-rate':'pump-add', 'pump-med':'pump-add', 'pw-new':'pw-change'};
   if (map[id]) { e.preventDefault(); H[map[id]](); }
 });
 window.addEventListener('online', updateNet);
